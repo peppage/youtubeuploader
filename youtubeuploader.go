@@ -46,12 +46,16 @@ var (
 	metaJSON    = flag.String("metaJSON", "", "JSON file containing title,description,tags etc (optional)")
 )
 
-type Snippet struct {
+type Meta struct {
 	Title         string   `json:"title,omitempty"`
 	Description   string   `json:"description,omitempty"`
 	CategoryId    string   `json:"categoryId,omitempty"`
 	PrivacyStatus string   `json:"privacyStatus,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
+	Monetization  struct {
+		Allowed         bool     `json:"allowed,omitempty"`
+		ExcludedRegions []string `json:"excluded_regions,omitempty"`
+	} `json:"monetization,omitempty"`
 }
 
 func main() {
@@ -120,9 +124,9 @@ func main() {
 						s := transport.reader.Monitor.Status()
 						curRate := float32(s.CurRate)
 						if curRate >= 125000 {
-							fmt.Printf("\rProgress: %8.2f Mbps, %d / %d (%s) ETA %8s", curRate/125000, s.Bytes, filesize, s.Progress, s.TimeRem)
+							fmt.Printf("\rProgress: %8.2f Mbps, %d / %d (%s) ETA %11s", curRate/125000, s.Bytes, filesize, s.Progress, s.TimeRem)
 						} else {
-							fmt.Printf("\rProgress: %8.2f kbps, %d / %d (%s) ETA %8s", curRate/125, s.Bytes, filesize, s.Progress, s.TimeRem)
+							fmt.Printf("\rProgress: %8.2f kbps, %d / %d (%s) ETA %11s", curRate/125, s.Bytes, filesize, s.Progress, s.TimeRem)
 						}
 					}
 				case <-quitChan:
@@ -148,24 +152,31 @@ func main() {
 
 	// attempt to load from meta JSON, otherwise use values specified from command line flags
 	if *metaJSON != "" {
-		snippet := Snippet{}
+		meta := Meta{}
 		file, e := ioutil.ReadFile(*metaJSON)
 		if e != nil {
 			fmt.Printf("Could not read metaJSON file '%s': %s\n", *metaJSON, e)
 			fmt.Println("Will use command line flags instead")
 		}
 
-		e = json.Unmarshal(file, &snippet)
+		e = json.Unmarshal(file, &meta)
 		if e != nil {
 			fmt.Printf("Could not read metaJSON file '%s': %s\n", *metaJSON, e)
 			fmt.Println("Will use command line flags instead")
 		}
 
-		upload.Snippet.Tags = snippet.Tags
-		upload.Snippet.Title = snippet.Title
-		upload.Snippet.Description = snippet.Description
-		upload.Snippet.CategoryId = snippet.CategoryId
-		upload.Status.PrivacyStatus = snippet.PrivacyStatus
+		upload.Snippet.Tags = meta.Tags
+		upload.Snippet.Title = meta.Title
+		upload.Snippet.Description = meta.Description
+		upload.Snippet.CategoryId = meta.CategoryId
+		upload.Status.PrivacyStatus = meta.PrivacyStatus
+		if meta.Monetization.Allowed {
+			upload.MonetizationDetails = &youtube.VideoMonetizationDetails{}
+			upload.MonetizationDetails.Access = &youtube.AccessPolicy{
+				Allowed:   true,
+				Exception: meta.Monetization.ExcludedRegions,
+			}
+		}
 	}
 
 	if upload.Status.PrivacyStatus == "" {
@@ -183,6 +194,7 @@ func main() {
 	if upload.Snippet.CategoryId == "" && *categoryId != "" {
 		upload.Snippet.Title = *categoryId
 	}
+	fmt.Printf("meta %+v\n", upload.MonetizationDetails.Access)
 
 	call := service.Videos.Insert("snippet,status", upload)
 
