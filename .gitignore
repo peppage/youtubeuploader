@@ -8,3 +8,4 @@
 .*.swp
 vendor
 youtubeuploader
+conf.toml

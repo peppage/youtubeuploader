@@ -17,12 +17,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/jasonlvhit/gocron"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/googleapi"
@@ -49,40 +49,83 @@ var (
 
 	// this is set by compile-time to match git tag
 	appVersion string = "unknown"
+
+	// Globals
+	db       *Store
+	client   *http.Client
+	settings *Settings
 )
 
+func init() {
+	settings = loadSettings("conf.toml")
+
+	db = openDatabase(settings.DbName)
+	db.initializeDatabase()
+
+	gocron.Every(settings.Interval).Minutes().Do(checkForNewUploads)
+}
+
 func main() {
-	flag.Parse()
+	watcher, err := fsnotify.NewWatcher()
+	handleErr(err)
+	defer watcher.Close()
 
-	if *showAppVersion {
-		fmt.Printf("Youtubeuploader version: %s\n", appVersion)
-		os.Exit(0)
-	}
+	done := make(chan bool)
 
-	if *filename == "" {
-		fmt.Printf("You must provide a filename of a video file to upload\n")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
+	go func() {
+		for {
+			select {
+			case ev := <-watcher.Events:
+				if isCreateEvent(ev.Op) && isVideoFile(ev.Name) {
+					v := Video{
+						Filename: ev.Name,
+					}
+					fmt.Printf("Saving new video file '%s'...\n", ev.Name)
+					db.saveVideo(v)
+				}
+			case err := <-watcher.Errors:
+				handleErr(err)
+			}
+		}
+	}()
 
-	var limitRange limitRange
-	if *limitBetween != "" {
-		var err error
-		limitRange, err = parseLimitBetween(*limitBetween)
-		if err != nil {
-			fmt.Printf("Invalid value for -limitBetween: %v", err)
-			os.Exit(1)
+	err = watcher.Add(settings.Folder)
+	handleErr(err)
+
+	<-gocron.Start()
+	<-done
+}
+
+func isCreateEvent(op fsnotify.Op) bool {
+	return op&fsnotify.Create == fsnotify.Create
+}
+
+func isVideoFile(filename string) bool {
+	return strings.Contains(filename, settings.Extension)
+}
+
+func checkForNewUploads() {
+	vids := db.getNotUploadedVideos()
+	for _, v := range vids {
+		fmt.Printf("Attemping to upload '%s'...\n", v.Filename)
+		err := upload(v.Filename, "Uploaded from script")
+		if err == nil {
+			db.setVideoUploaded(*v)
 		}
 	}
+}
 
-	reader, filesize := Open(*filename)
-	defer reader.Close()
-
-	var thumbReader io.ReadCloser
-	if *thumbnail != "" {
-		thumbReader, _ = Open(*thumbnail)
-		defer thumbReader.Close()
+func handleErr(err error) {
+	if err != nil {
+		panic(err)
 	}
+}
+
+func upload(filename string, title string) error {
+	var limitRange limitRange
+
+	reader, filesize := Open(filename)
+	defer reader.Close()
 
 	ctx := context.Background()
 	transport := &limitTransport{rt: http.DefaultTransport, lr: limitRange, filesize: filesize}
@@ -108,7 +151,7 @@ func main() {
 		Status:           &youtube.VideoStatus{},
 	}
 
-	videoMeta := LoadVideoMeta(*metaJSON, upload)
+	//videoMeta := LoadVideoMeta(*metaJSON, upload)
 
 	service, err := youtube.New(client)
 	if err != nil {
@@ -122,7 +165,7 @@ func main() {
 		upload.Snippet.Tags = strings.Split(*tags, ",")
 	}
 	if upload.Snippet.Title == "" {
-		upload.Snippet.Title = *title
+		upload.Snippet.Title = title
 	}
 	if upload.Snippet.Description == "" {
 		upload.Snippet.Description = *description
@@ -131,7 +174,7 @@ func main() {
 		upload.Snippet.CategoryId = *categoryId
 	}
 
-	fmt.Printf("Uploading file '%s'...\n", *filename)
+	fmt.Printf("Uploading file '%s'...\n", filename)
 
 	var option googleapi.MediaOption
 	var video *youtube.Video
@@ -153,29 +196,8 @@ func main() {
 		} else {
 			log.Fatalf("Error making YouTube API call: %v", err)
 		}
+		return err
 	}
 	fmt.Printf("Upload successful! Video ID: %v\n", video.Id)
-
-	if videoMeta.PlaylistID != "" {
-		err = AddVideoToPlaylist(service, videoMeta.PlaylistID, video.Id)
-		if err != nil {
-			log.Fatalf("Error adding video to playlist: %s", err)
-		}
-	}
-	if len(videoMeta.PlaylistIDs) > 0 {
-		for _, pid := range videoMeta.PlaylistIDs {
-			err = AddVideoToPlaylist(service, pid, video.Id)
-			if err != nil {
-				log.Fatalf("Error adding video to playlist: %s", err)
-			}
-		}
-	}
-	if thumbReader != nil {
-		log.Printf("Uploading thumbnail '%s'...\n", *thumbnail)
-		_, err = service.Thumbnails.Set(video.Id).Media(thumbReader).Do()
-		if err != nil {
-			log.Fatalf("Error making YouTube API call: %v", err)
-		}
-		fmt.Printf("Thumbnail uploaded!\n")
-	}
+	return nil
 }
