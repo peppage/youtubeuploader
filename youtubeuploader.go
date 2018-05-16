@@ -124,11 +124,14 @@ func handleErr(err error) {
 func upload(filename string, title string) error {
 	var limitRange limitRange
 
-	reader, filesize := Open(filename)
-	defer reader.Close()
+	openedFile, err := Open(filename)
+	if err != nil {
+		return err
+	}
+	defer openedFile.Reader.Close()
 
 	ctx := context.Background()
-	transport := &limitTransport{rt: http.DefaultTransport, lr: limitRange, filesize: filesize}
+	transport := &limitTransport{rt: http.DefaultTransport, lr: limitRange, filesize: openedFile.Filesize}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
 		Transport: transport,
 	})
@@ -137,12 +140,13 @@ func upload(filename string, title string) error {
 	if !*quiet {
 		quitChan = make(chanChan)
 		go func() {
-			Progress(quitChan, transport, filesize)
+			Progress(quitChan, transport, openedFile.Filesize)
 		}()
 	}
 	client, err := buildOAuthHTTPClient(ctx, []string{youtube.YoutubeUploadScope, youtube.YoutubeScope})
 	if err != nil {
-		log.Fatalf("Error building OAuth client: %v", err)
+		log.Printf("Error building OAuth client: %v", err)
+		return err
 	}
 
 	upload := &youtube.Video{
@@ -155,7 +159,8 @@ func upload(filename string, title string) error {
 
 	service, err := youtube.New(client)
 	if err != nil {
-		log.Fatalf("Error creating Youtube client: %s", err)
+		log.Printf("Error creating Youtube client: %s", err)
+		return err
 	}
 
 	if upload.Status.PrivacyStatus == "" {
@@ -182,7 +187,7 @@ func upload(filename string, title string) error {
 	option = googleapi.ChunkSize(*chunksize)
 
 	call := service.Videos.Insert("snippet,status,recordingDetails", upload)
-	video, err = call.Media(reader, option).Do()
+	video, err = call.Media(openedFile.Reader, option).Do()
 
 	if quitChan != nil {
 		quit := make(chan struct{})
@@ -192,9 +197,9 @@ func upload(filename string, title string) error {
 
 	if err != nil {
 		if video != nil {
-			log.Fatalf("Error making YouTube API call: %v, %v", err, video.HTTPStatusCode)
+			log.Printf("Error making YouTube API call: %v, %v", err, video.HTTPStatusCode)
 		} else {
-			log.Fatalf("Error making YouTube API call: %v", err)
+			log.Printf("Error making YouTube API call: %v", err)
 		}
 		return err
 	}
